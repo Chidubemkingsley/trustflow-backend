@@ -1,12 +1,28 @@
+import './config/load-dotenv.bootstrap';
 import { NestFactory } from '@nestjs/core';
-import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
-import { ValidationPipe, Logger } from '@nestjs/common';
 import * as Sentry from '@sentry/node';
 import { AppModule } from './app.module';
+import { configureApp } from './app.setup';
+import { validateEnv, config } from './config/env.config';
+import { ShutdownService } from './common/shutdown/shutdown.service';
+import { SanitizedLogger } from './common/logging/sanitized-logger';
 import { SentryService } from './sentry/sentry.service';
-import { SentryExceptionFilter } from './common/filters/sentry-exception.filter';
+import { createDocsBasicAuth, isSwaggerEnabled } from './common/http/docs-security';
 
-const logger = new Logger('Bootstrap');
+const logger = new SanitizedLogger('Bootstrap');
+
+// Validate environment variables at startup before anything else runs.
+// This fails fast with a clear error if required variables are missing or malformed,
+// rather than allowing the app to start with invalid config that only surfaces as
+// runtime errors later.
+try {
+  validateEnv();
+  logger.log('✓ Environment variables validated successfully');
+} catch (error) {
+  logger.error('Environment variable validation failed:');
+  logger.error(error instanceof Error ? error.message : String(error));
+  process.exit(1);
+}
 
 // Capture unhandled promise rejections before the app is ready
 process.on('unhandledRejection', (reason: unknown) => {
@@ -15,6 +31,7 @@ process.on('unhandledRejection', (reason: unknown) => {
     'Unhandled Promise Rejection',
     reason instanceof Error ? reason.stack : String(reason),
   );
+  process.exit(1);
 });
 
 // Capture uncaught synchronous exceptions and exit
@@ -27,83 +44,44 @@ process.on('uncaughtException', (error: Error) => {
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  // Initialize Sentry via the injectable service so it shares the same instance
-  const sentryService = app.get(SentryService);
-  sentryService.init();
-
-  // Register global exception filter — captures 5xx errors to Sentry
-  app.useGlobalFilters(new SentryExceptionFilter(sentryService));
-
-  // Enable CORS
-  app.enableCors({
-    origin: process.env.CORS_ORIGIN || '*',
-    credentials: true,
+  // The whole HTTP-level stack — security headers, body limits, Sentry, the exception
+  // filter, request timeouts, metrics, CORS, validation, API versioning, Swagger, and the
+  // Soroban indexer — is applied by `configureApp`. This used to be duplicated inline here
+  // and the copy had drifted badly: it referenced eight identifiers it never imported
+  // (including `express`, so the server died with `ReferenceError: express is not defined`
+  // on startup) and had silently dropped API versioning and the global request timeout.
+  // Sharing one implementation is what keeps production and the test suites in agreement.
+  const docsAuth = createDocsBasicAuth(config.SWAGGER_USER, config.SWAGGER_PASSWORD);
+  configureApp(app, {
+    skipSwagger: !isSwaggerEnabled(config),
+    ...(docsAuth ? { docsAuth } : {}),
   });
 
-  // Global validation pipe
-  app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,
-      transform: true,
-      forbidNonWhitelisted: true,
-    }),
-  );
-
-  // Swagger configuration
-  const config = new DocumentBuilder()
-    .setTitle('TrustFlow API')
-    .setDescription(
-      'The TrustFlow Backend API provides off-chain services for the TrustFlow gig economy platform. ' +
-        'It handles authentication, escrow management, webhook dispatch, and Stellar blockchain integration.\n\n' +
-        '**Error Monitoring:** All 5xx errors and unhandled exceptions are automatically captured by Sentry ' +
-        'for real-time alerting and triage. Set the `SENTRY_DSN` environment variable to enable.',
-    )
-    .setVersion('1.0.0')
-    .setContact('TrustFlow Protocol', 'https://trustflow.xyz', 'support@trustflow.xyz')
-    .setLicense('MIT', 'https://opensource.org/licenses/MIT')
-    .addServer(process.env.API_URL || 'http://localhost:3001', 'Development')
-    .addServer('https://api.trustflow.xyz', 'Production')
-    .addBearerAuth(
-      {
-        type: 'http',
-        scheme: 'bearer',
-        bearerFormat: 'JWT',
-        description: 'Enter JWT token obtained from /auth/login endpoint',
-      },
-      'JWT-auth',
-    )
-    .addTag('Authentication', 'Wallet-based JWT authentication endpoints')
-    .addTag('Escrow', 'Escrow vault management and dispute resolution')
-    .addTag('Webhooks', 'Webhook registration and management')
-    .addTag('Monitoring', 'Health checks and metrics')
-    .build();
-
-  const document = SwaggerModule.createDocument(app, config);
-
-  SwaggerModule.setup('api/docs', app, document, {
-    customSiteTitle: 'TrustFlow API Documentation',
-    customfavIcon: 'https://trustflow.xyz/favicon.ico',
-    customCss: '.swagger-ui .topbar { display: none }',
-    swaggerOptions: {
-      persistAuthorization: true,
-      tagsSorter: 'alpha',
-      operationsSorter: 'alpha',
-    },
-  });
-
-  SwaggerModule.setup('api/docs-json', app, document, {
-    jsonDocumentUrl: '/api/docs-json',
-  });
-
-  const port = process.env.PORT || 3001;
+  const swaggerEnabled = isSwaggerEnabled(config);
+  const port = config.PORT;
   await app.listen(port);
 
+  // Hand the app to the shutdown coordinator *after* it is listening, so a SIGTERM arriving
+  // during boot cannot race a half-initialised server. ShutdownService owns the SIGTERM and
+  // SIGINT handlers: it flips readiness to failing, drains in-flight requests within
+  // SHUTDOWN_TIMEOUT_MS, runs Nest's lifecycle hooks (ending the PostgreSQL pool), then exits.
+  app.get(ShutdownService).registerApp(app);
+
   logger.log(`🚀 TrustFlow API running on: http://localhost:${port}`);
-  logger.log(`📚 API Documentation: http://localhost:${port}/api/docs`);
-  logger.log(`📄 OpenAPI JSON: http://localhost:${port}/api/docs-json`);
-  if (sentryService.isInitialized()) {
+  if (swaggerEnabled) {
+    logger.log(`📚 API Documentation: http://localhost:${port}/api/docs`);
+    logger.log(`📄 OpenAPI JSON: http://localhost:${port}/api/docs-json`);
+  }
+  if (app.get(SentryService).isInitialized()) {
     logger.log('🔍 Sentry error monitoring active');
   }
 }
 
-bootstrap();
+bootstrap().catch(error => {
+  Sentry.captureException(error);
+  logger.error(
+    'Bootstrap failed — shutting down',
+    error instanceof Error ? error.stack : String(error),
+  );
+  process.exit(1);
+});

@@ -54,6 +54,7 @@ backend/dist
 backend/coverage
 backend/.env
 backend/*.log
+backend/openapi.json
 
 # Local status and tracking files
 INFRASTRUCTURE_SETUP_STATUS.md
@@ -64,3 +65,4 @@ NEXT_STEPS_CHECKLIST.md
 PR_DESCRIPTION.md
 
 # Local scripts output
+fix.md

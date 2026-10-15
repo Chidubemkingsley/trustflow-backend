@@ -26,16 +26,36 @@ Copy the example environment file and configure it:
 cp ../.env.example .env
 ```
 
+`npm run dev` and `npm start` load `backend/.env` automatically on startup (a missing file is
+fine — it's optional). Any variable already set in the real environment (your shell, a
+container, CI) takes precedence over the same variable in `.env`.
+
 Edit `.env` and set your values:
 
 ```env
 STELLAR_NETWORK=TESTNET
 STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org
 SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
+STELLAR_PLATFORM_ADDRESS=your_platform_xlm_account  # Optional — platform account address for balance monitoring
+STELLAR_LOW_BALANCE_THRESHOLD=1  # Optional — XLM balance warning threshold (default: 1 XLM)
+STELLAR_CRITICAL_BALANCE_THRESHOLD=0.5  # Optional — XLM balance critical threshold (default: 0.5 XLM)
 TRUSTFLOW_CONTRACT_ID=your_contract_id
-JWT_SECRET=your_secure_secret_here
+JWT_SECRET=change-me-before-production
+# ProductionJWT_SECRET must be at least 32 characters, random, and not a placeholder.
 PORT=3001
 DISCORD_WEBHOOK_URL=your_discord_webhook_url  # Optional
+PINATA_JWT=your_pinata_jwt  # Optional — unconfigured providers use an in-memory simulated store
+WEB3_STORAGE_TOKEN=your_web3_storage_token  # Optional
+INFURA_IPFS_PROJECT_ID=your_infura_project_id  # Optional
+INFURA_IPFS_PROJECT_SECRET=your_infura_project_secret  # Optional
+IPFS_REPIN_INTERVAL_MS=300000  # Optional — re-pin worker sweep interval, set to 0 to disable
+GIG_EXPIRY_SWEEP_INTERVAL_MS=300000  # Optional — gig expiry sweep interval, set to 0 to disable
+ADMIN_ADDRESSES=GADMIN1...,GADMIN2...  # Required for /admin/* and /migrations/* — comma-separated Stellar addresses allowed to access admin analytics and run/roll back schema migrations over HTTP (the startup auto-run via RUN_MIGRATIONS_ON_STARTUP is unaffected)
+DATABASE_URL=  # Optional — Core DB (PostgreSQL) connection string. Alternative: DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD
+DB_SSL=false  # Optional — set "true" to connect with ssl: { rejectUnauthorized: false }
+DB_POOL_MAX=10  # Optional — max PostgreSQL pool connections
+GIG_SEARCH_CACHE_TTL_SECONDS=30  # Optional — how long paginated gig search results stay cached in Redis
+RUN_MIGRATIONS_ON_STARTUP=true  # Optional — run registered schema migrations automatically on boot
 ```
 
 ### 3. Verify Installation
@@ -80,6 +100,43 @@ npm run test:cov
 npm run test:ci
 ```
 
+### Running the integration specs (Redis + PostgreSQL)
+
+A handful of specs — named `*-integration.spec.ts` (`rate-limit.redis-integration`,
+`nonce-store.redis-integration`, `gig.service.redis-integration`,
+`database.postgres-integration`, `health.postgres-integration`) — exercise a real Redis
+and/or PostgreSQL server instead of a mocked client. Each one checks `REDIS_URL`/`DATABASE_URL`
+itself and skips cleanly when unset, so plain `npm test` still works with no local Redis or
+Postgres. To actually run them locally:
+
+```bash
+# From the repo root: starts Redis and Postgres via docker compose
+docker compose up -d
+
+# From backend/: starts them (if not already running) and runs only the *-integration specs
+npm run test:integration
+```
+
+CI backs the same specs with its own `redis`/`postgres` service containers (see
+`.github/workflows/backend-ci.yml`) — `docker-compose.yml` at the repo root is for local
+development only.
+
+### Pre-commit hook
+
+`npm install` (in `backend/`) wires up a Husky `pre-commit` hook via the
+`prepare` script. It runs `lint-staged` over staged `.ts` files under
+`backend/` — `eslint --fix` then `prettier --write` — so a lint or formatting
+violation is fixed (or blocks the commit) locally, before it reaches the
+`lint:check` / `format:check` gates in `.github/workflows/backend-ci.yml`.
+
+The hook script is `backend/.husky/pre-commit`; the file globs and commands
+are the `lint-staged` block in `backend/package.json`. To bypass it for a
+single commit (rarely needed): `git commit --no-verify`.
+
+Because the repository keeps the Node project in `backend/` while `.git` is at
+the repo root, `prepare` runs Husky from the repo root and the hook invokes
+`lint-staged --cwd backend`.
+
 ### Code Quality
 
 ```bash
@@ -111,12 +168,31 @@ npm start
 ```
 backend/
 ├── src/
-│   ├── auth/              # JWT authentication
-│   ├── escrow/            # Escrow management
-│   ├── stellar/           # Stellar blockchain integration
-│   ├── webhook/           # Webhook system & Discord
-│   ├── monitoring/        # Health checks & metrics
-│   └── index.ts           # App entry point
+│   ├── admin/                  # Read-only protocol analytics dashboard (admin-only)
+│   ├── auth/                   # Wallet-signature JWT auth — challenge/verify, nonce store, guard
+│   ├── common/                 # Cross-cutting: rate limiting, Redis client, idempotency, pagination, logging, DB, filters
+│   ├── config/                 # Zod-validated env config, .env loading
+│   ├── deliverable/            # Gig deliverable submission and review
+│   ├── dispute/                # Dispute resolution saga (juror voting, resolution)
+│   ├── escrow/                 # Escrow vault CRUD, milestone release, disputes
+│   ├── escrow-reconciliation/  # Reconciles off-chain escrow state against on-chain Soroban state
+│   ├── escrow-write/           # Builds unsigned Soroban release transactions for client signing
+│   ├── event-ingestion/        # Polls Soroban RPC for contract events, feeds the outbox
+│   ├── gig/                    # Gig solicitation postings — accept/cancel, auto-expiry sweep
+│   ├── ipfs-pinning/           # Multi-provider IPFS pinning (Pinata/Web3.Storage/Infura) with failover
+│   ├── migration/              # Schema migration registry/runner (admin-triggered run/rollback)
+│   ├── milestone-notifications/# WebSocket gateway for milestone/escrow event notifications
+│   ├── monitoring/             # Health checks (`/health`) and Prometheus metrics (`/metrics`)
+│   ├── notification/           # Shared notification dispatch types/service
+│   ├── outbox/                 # Transactional outbox relay to WebSocket/webhooks/workers
+│   ├── reputation/             # Wallet reputation scoring with time decay
+│   ├── sentry/                 # Sentry error-monitoring integration
+│   ├── soroban-event-indexer/  # Indexes raw Soroban events into Redis for `/events/soroban`
+│   ├── stellar/                # Horizon/Soroban RPC clients, failover, network config
+│   ├── testing/                # Shared test doubles (fake Redis client)
+│   ├── user-profile/           # Wallet-linked user profiles — search, ratings, verification
+│   ├── webhook/                # Webhook registration/dispatch, HMAC signing, Discord notifications
+│   └── main.ts                 # App entry point
 ├── scripts/
 │   └── ci-check.sh        # Local CI verification
 ├── dist/                  # Build output (generated)
@@ -150,7 +226,7 @@ backend/
 
 1. Clear npm cache: `npm cache clean --force`
 2. Delete `node_modules` and `package-lock.json`, then retry
-3. Check Node.js version: `node -v` (should be 18.x or 20.x)
+3. Check Node.js version: `node -v` (should be >= 20, matching the repo-root `.nvmrc`)
 4. Try using `npm install --legacy-peer-deps`
 
 ### Issue: Port 3001 already in use
@@ -216,6 +292,23 @@ Always run the local CI check:
 
 This catches issues before they reach CI, saving time and CI minutes.
 
+## TypeScript Strictness
+
+This project enforces strict TypeScript mode (`strict: true` in `tsconfig.json`). All new code must compile cleanly under strict mode. This includes:
+
+- **strictNullChecks**: No null/undefined access without checks
+- **noImplicitAny**: Type all parameters and return values
+- **strictBindCallApply**: Strict typing for `.bind()`, `.call()`, and `.apply()`
+- **strictFunctionTypes**: Strict function type checking
+- **strictPropertyInitialization**: All class properties must be initialized or optional
+- **noImplicitThis**: Explicit `this` type required
+- **alwaysStrict**: "use strict" added to all files
+- **useUnknownInCatchVariables**: Catch variables typed as unknown
+- **noFallthroughCasesInSwitch**: Switch statements must have break statements
+- **forceConsistentCasingInFileNames**: File names must match imports
+
+When adding new types or modifying existing ones, ensure they pass strict type checking before pushing. If needed, use definite-assignment assertions (`!`) or optional properties (`?`) for DTO fields populated by framework deserialization.
+
 ## Next Steps
 
 1. ✅ Run `npm install`
@@ -229,5 +322,6 @@ This catches issues before they reach CI, saving time and CI minutes.
 ## Additional Resources
 
 - [Discord Integration Setup](src/webhook/DISCORD_INTEGRATION.md)
-- [CI/CD Documentation](.github/workflows/README.md)
+- [CI/CD Documentation](../.github/workflows/README.md)
+- [Dependency Audit Policy](DEPENDENCY_AUDIT_POLICY.md)
 - [Main README](../README.md)
