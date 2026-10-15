@@ -72,6 +72,67 @@ export class EscrowController {
     return this.escrowService.create(dto.depositor, dto.beneficiary, dto.amountXLM);
   }
 
+  @Post('milestones/batch-approve')
+  @ApiOperation({
+    summary: 'Batch approve milestones',
+    description:
+      'Approves multiple pending milestones across different contracts in a single authenticated API call.',
+  })
+  @ApiBody({
+    description: 'Batch approval details',
+    schema: {
+      type: 'object',
+      required: ['milestoneIds', 'signerAddress'],
+      properties: {
+        milestoneIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'List of milestone IDs to approve',
+          example: ['ms-123', 'ms-456'],
+        },
+        signerAddress: {
+          type: 'string',
+          description: 'Stellar address of the approver (must be depositor)',
+          example: 'GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
+        },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Batch approval result with succeeded and failed breakdown',
+    schema: {
+      type: 'object',
+      properties: {
+        succeeded: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              status: { type: 'string' },
+            },
+          },
+        },
+        failed: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              reason: { type: 'string' },
+            },
+          },
+        },
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'Invalid request body' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  async batchApproveMilestones(@Body() body: { milestoneIds: string[]; signerAddress: string }) {
+    return this.escrowService.batchApproveMilestones(body.milestoneIds, body.signerAddress);
+  }
+
   @Get(':id')
   @ApiOperation({
     summary: 'Get escrow by ID',

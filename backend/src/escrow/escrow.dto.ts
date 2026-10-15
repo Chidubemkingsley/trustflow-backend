@@ -15,3 +15,15 @@ export const ReleaseEscrowSchema = z.object({
 });
 
 export type ReleaseEscrowDto = z.infer<typeof ReleaseEscrowSchema>;
+
+export const BatchApproveMilestoneSchema = z.object({
+  milestoneIds: z.array(z.string().min(1)).min(1).max(100),
+  signerAddress: z.string().regex(/^G[A-Z2-7]{55}$/, 'Invalid Stellar address'),
+});
+
+export type BatchApproveMilestoneDto = z.infer<typeof BatchApproveMilestoneSchema>;
+
+export interface BatchApproveResult {
+  succeeded: Array<{ id: string; status: string }>;
+  failed: Array<{ id: string; reason: string }>;
+}

@@ -5,8 +5,11 @@ import { WebhookModule } from './webhook/webhook.module';
 import { MonitoringModule } from './monitoring/monitoring.module';
 import { StellarModule } from './stellar/stellar.module';
 import { SentryModule } from './sentry/sentry.module';
+import { NotificationModule } from './notification/notification.module';
+import { OutboxModule } from './outbox/outbox.module';
+import { CacheModule } from './common/cache.module';
 
 @Module({
-  imports: [SentryModule, AuthModule, EscrowModule, WebhookModule, MonitoringModule, StellarModule],
+  imports: [SentryModule, AuthModule, EscrowModule, WebhookModule, MonitoringModule, StellarModule, NotificationModule, OutboxModule, CacheModule],
 })
 export class AppModule {}
