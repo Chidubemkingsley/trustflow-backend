@@ -179,6 +179,15 @@ export class GigService implements OnModuleInit {
     return { data, total };
   }
 
+  /**
+   * Return all gigs with the given status.
+   * Used by the milestone expiry scheduler to find open gigs nearing deadline.
+   */
+  async findByStatus(status: GigStatus): Promise<Gig[]> {
+    const all = await this.findAll();
+    return all.filter(g => g.status === status);
+  }
+
   /** Open gig solicitations whose response deadline has passed as of `now`. */
   async findExpirable(now: Date = new Date()): Promise<Gig[]> {
     if (this.redis) {
